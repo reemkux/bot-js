@@ -22,4 +22,4 @@ jobs:
           # Ou spécifiquement: npm install axios ccxt etc.
 
       - name: Run Bot
-        run: node bot.js  # Remplacez par votre fichier principal
+        run: node deploy_bot.js  # ⚠️ Remplacez par le VRAI fichier principal
