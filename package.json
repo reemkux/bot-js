@@ -1,0 +1,12 @@
+{
+  "name": "relay-trading-bot",
+  "version": "1.0.0",
+  "description": "Bot trading avec relais",
+  "main": "realistic_bot.js",
+  "scripts": {
+    "start": "node realistic_bot.js"
+  },
+  "dependencies": {
+    "ws": "^8.14.2"
+  }
+}
