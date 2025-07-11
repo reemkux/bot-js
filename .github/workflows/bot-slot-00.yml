@@ -34,4 +34,4 @@ jobs:
       env:
         TIME_SLOT: 0
         NODE_ENV: production
-      run: node bot.js
+      run: node realistic_bot.js
