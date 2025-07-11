@@ -1,0 +1,37 @@
+name: "Bot Slot 00h-06h"
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 00:00 UTC tous les jours
+  workflow_dispatch:
+
+jobs:
+  trading-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 heures max
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Important pour git push
+        
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+        
+    - name: Install Dependencies
+      run: npm install
+      
+    - name: Configure Git
+      run: |
+        git config --global user.name "Trading Bot"
+        git config --global user.email "bot@trading.com"
+        
+    - name: Run Trading Bot Slot 00h
+      env:
+        TIME_SLOT: 0
+        NODE_ENV: production
+      run: node bot.js
