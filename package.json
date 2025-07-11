@@ -1,23 +1,15 @@
-{
-  "name": "realistic-trading-bot",
+  "name": "relay-trading-bot",
   "version": "1.0.0",
-  "description": "Realistic Trading Bot with Risk Management - Paper Trading Mode",
-  "main": "realistic_bot.js",
+  "description": "Bot trading 24/7 avec système de relais",
+  "main": "bot.js",
   "scripts": {
-    "start": "node realistic_bot.js",
-    "paper": "node realistic_bot.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node bot.js",
+    "test": "echo \"No tests\" && exit 0"
   },
-  "keywords": [
-    "trading",
-    "bot",
-    "paper-trading",
-    "simulation"
-  ],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "@types/node": "^22.13.11",
-    "ws": "^8.18.3"
+    "ws": "^8.14.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
