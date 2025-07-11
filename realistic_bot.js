@@ -132,7 +132,8 @@ class RealisticTradingBot {
             'WARN': '⚠️',
             'ERROR': '❌',
             'SUCCESS': '✅',
-            'TRADE': '💰'
+            'TRADE': '💰',
+            'DEBUG': '🔍'
         };
 
         console.log(`${emoji[level] || '📝'} [${category}] ${message}`, 
@@ -242,8 +243,8 @@ class RealisticTradingBot {
         return Math.sqrt(variance) / mean;
     }
 
-    // Décision de trading
-    shouldTrade(analysis) {
+    // Décision de trading (MODIFIÉ avec debug et seuil abaissé)
+    shouldTrade(analysis, symbol) {
         const signals = {
             rsi_oversold: analysis.rsi < 35,
             rsi_overbought: analysis.rsi > 65,
@@ -256,7 +257,18 @@ class RealisticTradingBot {
         if (signals.high_volume) score += 20;
         if (signals.good_volatility) score += 20;
 
-        return score >= 60 ? { direction: 'BUY', score, signals } : null;
+        // AJOUT DU DEBUG LOGGING
+        this.log('DEBUG', 'SIGNALS', `Analyse ${symbol}`, {
+            rsi: analysis.rsi.toFixed(2),
+            volumeRatio: analysis.volumeRatio.toFixed(2),
+            volatility: (analysis.volatility * 100).toFixed(2) + '%',
+            signals,
+            score,
+            threshold: 40
+        });
+
+        // SEUIL ABAISSÉ DE 60 À 40
+        return score >= 40 ? { direction: 'BUY', score, signals } : null;
     }
 
     // Exécution de trade simulé
@@ -283,7 +295,8 @@ class RealisticTradingBot {
 
         this.log('TRADE', 'SIMULATION', `Trade simulé ${signal.direction} sur ${symbol}`, {
             price: analysis.currentPrice,
-            confidence: signal.score
+            confidence: signal.score,
+            signals: signal.signals
         });
 
         // Simuler fermeture après quelques secondes
@@ -357,12 +370,13 @@ class RealisticTradingBot {
         this.state.isRunning = true;
         this.log('SUCCESS', 'SYSTEM', 'Bot de trading démarré en mode paper trading');
 
-        console.log('\n🤖 REALISTIC TRADING BOT - PAPER TRADING');
-        console.log('═══════════════════════════════════════════');
+        console.log('\n🤖 REALISTIC TRADING BOT - PAPER TRADING (DEBUG MODE)');
+        console.log('═══════════════════════════════════════════════════════');
         console.log('📊 Objectif quotidien: 0.3-0.5%');
         console.log('🛡️  Stop-loss: 1.5%');
         console.log('💰 Capital: $' + this.config.totalCapital.toLocaleString());
         console.log('📈 Symboles: ' + this.config.symbols.join(', '));
+        console.log('🔍 Seuil de trade abaissé à 40 (au lieu de 60)');
         console.log('⚠️  MODE SIMULATION - Aucun argent réel\n');
 
         while (this.state.isRunning) {
@@ -372,12 +386,19 @@ class RealisticTradingBot {
                     // Analyser chaque symbole
                     for (const symbol of this.config.symbols) {
                         const analysis = this.analyzeMarket(symbol);
-                        const signal = this.shouldTrade(analysis);
+                        const signal = this.shouldTrade(analysis, symbol);
 
                         if (signal) {
                             await this.executeSimulatedTrade(signal, symbol);
                         }
                     }
+                } else {
+                    this.log('WARN', 'SAFETY', 'Trading bloqué par les limites de sécurité', {
+                        dailyTrades: this.state.dailyStats.tradesCount,
+                        maxDaily: this.config.maxTradesPerDay,
+                        consecutiveLosses: this.state.consecutiveLosses,
+                        maxLosses: this.config.maxConsecutiveLosses
+                    });
                 }
 
                 // Afficher stats toutes les minutes
