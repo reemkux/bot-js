@@ -2156,10 +2156,10 @@
     }
   },
   "relayInfo": {
-    "currentSlot": 0,
-    "sessionStart": 1752285964184,
-    "totalSessions": 1,
-    "lastHandoff": 1752307403828,
-    "nextSlot": 6
+    "currentSlot": 12,
+    "sessionStart": 1752324211485,
+    "totalSessions": 2,
+    "lastHandoff": 1752345649993,
+    "nextSlot": 18
   }
 }
