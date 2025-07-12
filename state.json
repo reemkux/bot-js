@@ -2,13 +2,13 @@
   "isRunning": false,
   "currentPositions": [],
   "dailyStats": {
-    "date": "2025-07-11",
+    "date": "2025-07-12",
     "tradesCount": 3,
-    "profitLoss": 0.16275090631982495,
+    "profitLoss": 0.2879120325320764,
     "fees": 0,
-    "winRate": 0.6666666666666666,
-    "wins": 2,
-    "losses": 1,
+    "winRate": 1,
+    "wins": 3,
+    "losses": 0,
     "totalRisk": 0
   },
   "consecutiveLosses": 0,
@@ -2156,10 +2156,10 @@
     }
   },
   "relayInfo": {
-    "currentSlot": 18,
-    "sessionStart": 1752251199063,
-    "totalSessions": 0,
-    "lastHandoff": 1752272637857,
-    "nextSlot": 0
+    "currentSlot": 0,
+    "sessionStart": 1752285964184,
+    "totalSessions": 1,
+    "lastHandoff": 1752307403828,
+    "nextSlot": 6
   }
 }
