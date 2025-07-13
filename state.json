@@ -2,17 +2,17 @@
   "isRunning": false,
   "currentPositions": [],
   "dailyStats": {
-    "date": "2025-07-12",
+    "date": "2025-07-13",
     "tradesCount": 3,
-    "profitLoss": 0.2879120325320764,
+    "profitLoss": -0.02191391956326697,
     "fees": 0,
-    "winRate": 1,
-    "wins": 3,
-    "losses": 0,
+    "winRate": 0.3333333333333333,
+    "wins": 1,
+    "losses": 2,
     "totalRisk": 0
   },
-  "consecutiveLosses": 0,
-  "lastLossTime": 1752251240768,
+  "consecutiveLosses": 2,
+  "lastLossTime": 1752376906012,
   "tradingData": {
     "BTCUSDT": [
       {
@@ -2156,10 +2156,10 @@
     }
   },
   "relayInfo": {
-    "currentSlot": 12,
-    "sessionStart": 1752324211485,
-    "totalSessions": 2,
-    "lastHandoff": 1752345649993,
-    "nextSlot": 18
+    "currentSlot": 0,
+    "sessionStart": 1752373220017,
+    "totalSessions": 3,
+    "lastHandoff": 1752394659009,
+    "nextSlot": 6
   }
 }
