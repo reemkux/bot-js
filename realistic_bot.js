@@ -1,629 +1,396 @@
+// ===== REALISTIC BOT ENHANCED - Version avec Trade Tracking =====
 const fs = require('fs');
 const path = require('path');
-const { exec } = require('child_process');
-const { promisify } = require('util');
-const execAsync = promisify(exec);
 
-class RelayTradingBot {
-    constructor(config) {
-        this.config = {
-            // MODE OBLIGATOIRE pour débuter
-            paperTrading: config.paperTrading !== false, // true par défaut
-
-            // SYSTÈME DE RELAIS
-            timeSlot: parseInt(process.env.TIME_SLOT) || config.timeSlot || 0, // 0, 6, 12, 18
-            maxRuntime: config.maxRuntime || (5 * 60 + 57) * 60 * 1000, // 5h57min en ms
-            relayBuffer: config.relayBuffer || 3 * 60 * 1000, // 3min de battement
-
-            // OBJECTIFS RÉALISTES
-            dailyTargetMin: config.dailyTargetMin || 0.003, // 0.3%
-            dailyTargetMax: config.dailyTargetMax || 0.005, // 0.5%
-
-            // GESTION DES RISQUES
-            stopLossPercent: config.stopLossPercent || 0.015, // 1.5%
-            maxStopLossPercent: config.maxStopLossPercent || 0.02, // 2% max
-
-            // GESTION DU CAPITAL
-            totalCapital: config.totalCapital || 10000, // Capital total
-            maxPositionPercent: config.maxPositionPercent || 0.05, // 5% max par trade
-            maxDailyRisk: config.maxDailyRisk || 0.02, // 2% du capital/jour max
-            subPortfolios: config.subPortfolios || 4, // Diviser en 4 sous-portefeuilles
-
-            // LIMITES DE SÉCURITÉ
-            maxTradesPerDay: config.maxTradesPerDay || 3,
-            maxConsecutiveLosses: config.maxConsecutiveLosses || 3,
-            cooldownAfterLoss: config.cooldownAfterLoss || 3600000, // 1h en ms
-
-            // CONFIGURATION
-            symbols: config.symbols || ['BTCUSDT', 'ETHUSDT', 'ADAUSDT'],
-            ...config
-        };
-
-        this.startTime = Date.now();
-        this.stateFile = path.join(__dirname, 'state.json');
-        
-        this.state = {
-            isRunning: false,
-            currentPositions: [],
-            dailyStats: this.initDailyStats(),
-            consecutiveLosses: 0,
-            lastLossTime: null,
-            tradingData: {},
-            subPortfolioBalances: this.initSubPortfolios(),
-            relayInfo: {
-                currentSlot: this.config.timeSlot,
-                sessionStart: this.startTime,
-                totalSessions: 0,
-                lastHandoff: null
-            }
-        };
-
-        this.setupLogging();
-        this.validateTimeSlot();
-        this.loadPreviousState();
+// ===== TRADE TRACKER CLASS =====
+class TradeTracker {
+    constructor() {
+        this.sessionTrades = [];
+        this.sessionStartTime = Date.now();
+        this.logFile = './logs/trades_detail.json';
+        this.loadExistingTrades();
     }
 
-    // Validation du créneau horaire
-    validateTimeSlot() {
-        const validSlots = [0, 6, 12, 18];
-        if (!validSlots.includes(this.config.timeSlot)) {
-            throw new Error(`❌ TIME_SLOT invalide: ${this.config.timeSlot}. Doit être: 0, 6, 12, ou 18`);
-        }
-
-        const now = new Date();
-        const currentHour = now.getUTCHours();
-        const expectedHour = this.config.timeSlot;
-        
-        // Vérifier si on est dans la bonne fenêtre (avec tolérance de 10min)
-        const hourDiff = Math.abs(currentHour - expectedHour);
-        if (hourDiff > 0 && hourDiff < 6) {
-            console.log(`⚠️  Attention: Heure actuelle ${currentHour}h, slot attendu ${expectedHour}h`);
-        }
-
-        console.log(`🕐 Slot horaire: ${this.config.timeSlot}h-${(this.config.timeSlot + 6) % 24}h`);
-        console.log(`⏰ Durée max: ${Math.floor(this.config.maxRuntime / 1000 / 60)}min`);
-    }
-
-    // Chargement de l'état précédent
-    loadPreviousState() {
-        if (fs.existsSync(this.stateFile)) {
-            try {
-                const savedState = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
-                
-                // Vérifier si l'état est récent (< 24h)
-                const stateAge = Date.now() - savedState.relayInfo.lastHandoff;
-                if (stateAge < 24 * 60 * 60 * 1000) {
-                    // Restaurer l'état mais pas les timeouts
-                    this.state = {
-                        ...this.state,
-                        currentPositions: savedState.currentPositions || [],
-                        dailyStats: savedState.dailyStats || this.state.dailyStats,
-                        consecutiveLosses: savedState.consecutiveLosses || 0,
-                        lastLossTime: savedState.lastLossTime,
-                        tradingData: savedState.tradingData || {},
-                        subPortfolioBalances: savedState.subPortfolioBalances || this.state.subPortfolioBalances,
-                        relayInfo: {
-                            ...savedState.relayInfo,
-                            currentSlot: this.config.timeSlot,
-                            sessionStart: this.startTime,
-                            totalSessions: (savedState.relayInfo.totalSessions || 0) + 1
-                        }
-                    };
-
-                    this.log('SUCCESS', 'RELAY', 'État précédent chargé avec succès', {
-                        positions: this.state.currentPositions.length,
-                        trades: this.state.dailyStats.tradesCount,
-                        session: this.state.relayInfo.totalSessions
-                    });
-                } else {
-                    this.log('WARN', 'RELAY', 'État précédent trop ancien, reset');
-                    this.resetDailyStats();
-                }
-            } catch (error) {
-                this.log('ERROR', 'RELAY', 'Erreur chargement état', { error: error.message });
-            }
-        } else {
-            this.log('INFO', 'RELAY', 'Première session, aucun état précédent');
-        }
-    }
-
-    // Sauvegarde de l'état pour le prochain bot
-    async saveState() {
-        const stateToSave = {
-            ...this.state,
-            relayInfo: {
-                ...this.state.relayInfo,
-                lastHandoff: Date.now(),
-                nextSlot: (this.config.timeSlot + 6) % 24
-            }
-        };
-
+    loadExistingTrades() {
         try {
-            fs.writeFileSync(this.stateFile, JSON.stringify(stateToSave, null, 2));
-            this.log('SUCCESS', 'RELAY', 'État sauvegardé localement');
-
-            // Commit vers GitHub
-            await this.commitStateToGitHub();
-            
+            if (fs.existsSync(this.logFile)) {
+                const data = fs.readFileSync(this.logFile, 'utf8');
+                this.sessionTrades = JSON.parse(data);
+                console.log(`📂 Chargé ${this.sessionTrades.length} trades existants`);
+            }
         } catch (error) {
-            this.log('ERROR', 'RELAY', 'Erreur sauvegarde état', { error: error.message });
-            throw error;
+            console.log('📂 Nouveau fichier de trades créé');
+            this.sessionTrades = [];
         }
     }
 
-    // Commit automatique vers GitHub
-    async commitStateToGitHub() {
-        try {
-            const commitMessage = `🤖 Bot relay handoff - Slot ${this.config.timeSlot}h → ${(this.config.timeSlot + 6) % 24}h`;
+    recordTrade(symbol, entryPrice, direction, amount = 1) {
+        const trade = {
+            id: `trade_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            symbol: symbol,
+            entryPrice: entryPrice,
+            direction: direction, // 'LONG' ou 'SHORT'
+            amount: amount,
+            status: 'OPEN',
+            session: this.getCurrentSession()
+        };
+
+        this.sessionTrades.push(trade);
+        this.logTradeOpen(trade);
+        this.saveTrades();
+        return trade.id;
+    }
+
+    closeTrade(tradeId, exitPrice, pnl) {
+        const trade = this.sessionTrades.find(t => t.id === tradeId);
+        if (trade) {
+            trade.exitPrice = exitPrice;
+            trade.pnl = pnl;
+            trade.isWin = pnl > 0;
+            trade.status = 'CLOSED';
+            trade.closedAt = new Date().toISOString();
+            trade.duration = Date.now() - new Date(trade.timestamp).getTime();
             
-            await execAsync('git add state.json');
-            await execAsync(`git commit -m "${commitMessage}"`);
-            await execAsync('git push origin main');
-            
-            this.log('SUCCESS', 'RELAY', 'État committé vers GitHub');
-        } catch (error) {
-            this.log('ERROR', 'RELAY', 'Erreur commit GitHub', { error: error.message });
-            // Ne pas faire échouer le processus pour un problème de commit
+            this.logTradeClose(trade);
+            this.saveTrades();
+            this.showSessionStats();
+            return trade;
         }
+        return null;
     }
 
-    // Vérification du temps de fonctionnement
-    getRuntimeInfo() {
-        const runtime = Date.now() - this.startTime;
-        const remaining = this.config.maxRuntime - runtime;
-        const runtimeMin = Math.floor(runtime / 1000 / 60);
-        const remainingMin = Math.floor(remaining / 1000 / 60);
-
-        return {
-            runtime,
-            remaining,
-            runtimeMin,
-            remainingMin,
-            shouldStop: remaining <= 0
-        };
+    getCurrentSession() {
+        const hour = new Date().getHours();
+        if (hour >= 0 && hour < 6) return '00h-06h';
+        if (hour >= 6 && hour < 12) return '06h-12h';
+        if (hour >= 12 && hour < 18) return '12h-18h';
+        return '18h-00h';
     }
 
-    // Arrêt gracieux avec handoff
-    async gracefulShutdown() {
-        this.log('WARN', 'RELAY', 'Début de l\'arrêt gracieux');
+    logTradeOpen(trade) {
+        console.log('\n' + '🎯'.repeat(15));
+        console.log(`🚀 TRADE OUVERT - ${trade.direction}`);
+        console.log(`📅 Timestamp: ${new Date(trade.timestamp).toLocaleString()}`);
+        console.log(`🔢 ID: ${trade.id}`);
+        console.log(`💰 Symbole: ${trade.symbol}`);
+        console.log(`💵 Prix entrée: ${trade.entryPrice}$`);
+        console.log(`📦 Quantité: ${trade.amount}`);
+        console.log(`⏰ Session: ${trade.session}`);
+        console.log('🎯'.repeat(15));
+    }
+
+    logTradeClose(trade) {
+        const emoji = trade.isWin ? '🟢' : '🔴';
+        const result = trade.isWin ? 'GAGNANT' : 'PERDANT';
+        const durationSec = Math.round(trade.duration / 1000);
         
-        // Arrêter les nouveaux trades
-        this.state.isRunning = false;
-
-        // Fermer les positions ouvertes (simulation)
-        for (const position of this.state.currentPositions) {
-            this.closeSimulatedPosition(position);
-        }
-
-        // Attendre que les positions se ferment
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        // Sauvegarder l'état final
-        await this.saveState();
-
-        // Logs finaux
-        this.log('SUCCESS', 'RELAY', 'Handoff terminé', {
-            totalTrades: this.state.dailyStats.tradesCount,
-            pnl: this.state.dailyStats.profitLoss.toFixed(2),
-            nextSlot: `${(this.config.timeSlot + 6) % 24}h`,
-            runtime: this.getRuntimeInfo().runtimeMin + 'min'
-        });
-
-        console.log('\n🔄 HANDOFF VERS LE PROCHAIN BOT');
-        console.log('═══════════════════════════════');
-        console.log(`📊 Session ${this.config.timeSlot}h terminée`);
-        console.log(`💰 PnL total: ${this.state.dailyStats.profitLoss.toFixed(2)}$`);
-        console.log(`📈 Trades: ${this.state.dailyStats.tradesCount}`);
-        console.log(`🔄 Prochain slot: ${(this.config.timeSlot + 6) % 24}h`);
-        console.log('⏳ Attente de 3 minutes...\n');
-
-        process.exit(0);
+        console.log('\n' + emoji.repeat(15));
+        console.log(`${emoji} TRADE ${result}`);
+        console.log(`🔢 ID: ${trade.id}`);
+        console.log(`📊 ${trade.direction} ${trade.symbol}`);
+        console.log(`📈 Prix: ${trade.entryPrice}$ → ${trade.exitPrice}$`);
+        console.log(`💰 PnL: ${trade.pnl > 0 ? '+' : ''}${trade.pnl.toFixed(4)}$`);
+        console.log(`⏱️ Durée: ${durationSec}s`);
+        console.log(`⏰ Session: ${trade.session}`);
+        console.log(emoji.repeat(15));
     }
 
-    // Reset stats quotidiennes si nouveau jour
-    resetDailyStats() {
-        const today = new Date().toISOString().split('T')[0];
-        if (this.state.dailyStats.date !== today) {
-            this.state.dailyStats = this.initDailyStats();
-            this.log('INFO', 'SYSTEM', 'Stats quotidiennes réinitialisées');
-        }
-    }
-
-    // Initialisation des sous-portefeuilles
-    initSubPortfolios() {
-        const balancePerPortfolio = this.config.totalCapital / this.config.subPortfolios;
-        const portfolios = {};
-
-        for (let i = 1; i <= this.config.subPortfolios; i++) {
-            portfolios[`portfolio_${i}`] = {
-                balance: balancePerPortfolio,
-                initialBalance: balancePerPortfolio,
-                activePositions: 0,
-                totalTrades: 0,
-                profitLoss: 0,
-                lastTradeTime: null
-            };
-        }
-
-        return portfolios;
-    }
-
-    // Initialisation stats journalières
-    initDailyStats() {
-        return {
-            date: new Date().toISOString().split('T')[0],
-            tradesCount: 0,
-            profitLoss: 0,
-            fees: 0,
-            winRate: 0,
-            wins: 0,
-            losses: 0,
-            totalRisk: 0
-        };
-    }
-
-    // Configuration du système de logs
-    setupLogging() {
-        const logsDir = path.join(__dirname, 'logs');
-        if (!fs.existsSync(logsDir)) {
-            fs.mkdirSync(logsDir, { recursive: true });
-        }
-
-        this.logFiles = {
-            trades: path.join(logsDir, 'trades.json'),
-            daily: path.join(logsDir, 'daily_stats.json'),
-            errors: path.join(logsDir, 'errors.log'),
-            performance: path.join(logsDir, 'performance.json'),
-            relay: path.join(logsDir, 'relay.log')
-        };
-    }
-
-    // Système de logs avancé
-    log(level, category, message, data = {}) {
-        const timestamp = new Date().toISOString();
-        const runtimeInfo = this.getRuntimeInfo();
+    showSessionStats() {
+        const closedTrades = this.sessionTrades.filter(t => t.status === 'CLOSED');
+        const currentSession = this.getCurrentSession();
+        const sessionTrades = closedTrades.filter(t => t.session === currentSession);
         
-        const logEntry = {
-            timestamp,
-            level,
-            category,
-            message,
-            slot: this.config.timeSlot,
-            runtime: runtimeInfo.runtimeMin + 'min',
-            remaining: runtimeInfo.remainingMin + 'min',
-            paperTrading: this.config.paperTrading,
-            ...data
-        };
+        if (sessionTrades.length === 0) return;
 
-        // Console
-        const emoji = {
-            'INFO': 'ℹ️',
-            'WARN': '⚠️',
-            'ERROR': '❌',
-            'SUCCESS': '✅',
-            'TRADE': '💰',
-            'DEBUG': '🔍',
-            'RELAY': '🔄'
-        };
-
-        console.log(`${emoji[level] || '📝'} [${category}] ${message}`, 
-                   Object.keys(data).length > 0 ? data : '');
-
-        // Fichier selon le type
-        if (level === 'ERROR') {
-            fs.appendFileSync(this.logFiles.errors, JSON.stringify(logEntry) + '\n');
-        }
-
-        if (category === 'TRADE') {
-            fs.appendFileSync(this.logFiles.trades, JSON.stringify(logEntry) + '\n');
-        }
-
-        if (category === 'RELAY') {
-            fs.appendFileSync(this.logFiles.relay, JSON.stringify(logEntry) + '\n');
-        }
-    }
-
-    // Génération de données simulées (gardé identique)
-    generateSimulatedMarketData(symbol) {
-        const basePrice = symbol === 'BTCUSDT' ? 43000 : symbol === 'ETHUSDT' ? 2600 : 0.4;
-        const data = [];
-
-        for (let i = 0; i < 100; i++) {
-            const timestamp = Date.now() - (99 - i) * 60000;
-            const trend = Math.sin(i * 0.1) * 0.5;
-            const volatility = 0.005 + Math.random() * 0.025;
-            const randomChange = (Math.random() - 0.5) * 2;
-            const change = basePrice * volatility * (trend + randomChange * 0.3);
-            const price = basePrice + change;
-            const volumeSpike = Math.random() > 0.9 ? 3 : 1;
-            const volume = (800 + Math.random() * 2000) * volumeSpike;
-
-            data.push({
-                timestamp,
-                close: price,
-                volume: volume,
-                high: price + Math.abs(change) * 0.5,
-                low: price - Math.abs(change) * 0.5
+        const winningTrades = sessionTrades.filter(t => t.isWin);
+        const totalPnL = sessionTrades.reduce((sum, t) => sum + t.pnl, 0);
+        const winRate = (winningTrades.length / sessionTrades.length * 100);
+        
+        console.log('\n' + '📊'.repeat(20));
+        console.log(`📈 STATS SESSION ${currentSession}`);
+        console.log('📊'.repeat(20));
+        console.log(`📊 Trades: ${sessionTrades.length} | Win: ${winRate.toFixed(1)}% | PnL: ${totalPnL.toFixed(4)}$`);
+        
+        if (winningTrades.length > 0) {
+            console.log(`🏆 GAGNANTS (${winningTrades.length}):`);
+            winningTrades.forEach((trade, i) => {
+                console.log(`   ${i+1}. ${trade.direction} ${trade.symbol} → +${trade.pnl.toFixed(4)}$`);
             });
         }
-
-        return data;
-    }
-
-    // Analyse technique (gardé identique)
-    analyzeMarket(symbol) {
-        if (!this.state.tradingData[symbol]) {
-            this.state.tradingData[symbol] = this.generateSimulatedMarketData(symbol);
-        }
-
-        const data = this.state.tradingData[symbol];
-        const prices = data.map(d => d.close);
-        const volumes = data.map(d => d.volume);
-
-        const rsi = this.calculateRSI(prices, 14);
-        const sma_20 = this.calculateSMA(prices, 20);
-        const currentPrice = prices[prices.length - 1];
-
-        return {
-            rsi,
-            sma_20,
-            currentPrice,
-            volatility: this.calculateVolatility(prices, 20),
-            volumeRatio: volumes[volumes.length - 1] / this.calculateSMA(volumes, 20)
-        };
-    }
-
-    // Calculs techniques (gardés identiques)
-    calculateRSI(prices, period = 14) {
-        if (prices.length < period + 1) return 50;
-        let gains = 0, losses = 0;
-        for (let i = prices.length - period; i < prices.length; i++) {
-            const change = prices[i] - prices[i - 1];
-            if (change > 0) gains += change;
-            else losses += Math.abs(change);
-        }
-        const avgGain = gains / period;
-        const avgLoss = losses / period;
-        if (avgLoss === 0) return 100;
-        const rs = avgGain / avgLoss;
-        return 100 - (100 / (1 + rs));
-    }
-
-    calculateSMA(prices, period) {
-        if (prices.length < period) return prices[prices.length - 1];
-        const slice = prices.slice(-period);
-        return slice.reduce((sum, price) => sum + price, 0) / period;
-    }
-
-    calculateVolatility(prices, period = 20) {
-        if (prices.length < period) return 0.02;
-        const slice = prices.slice(-period);
-        const mean = slice.reduce((sum, p) => sum + p, 0) / period;
-        const variance = slice.reduce((sum, p) => sum + Math.pow(p - mean, 2), 0) / period;
-        return Math.sqrt(variance) / mean;
-    }
-
-    // Décision de trading
-    shouldTrade(analysis, symbol) {
-        const signals = {
-            rsi_oversold: analysis.rsi < 35,
-            rsi_overbought: analysis.rsi > 65,
-            high_volume: analysis.volumeRatio > 1.3,
-            good_volatility: analysis.volatility > 0.01 && analysis.volatility < 0.05
-        };
-
-        let score = 0;
-        if (signals.rsi_oversold) score += 30;
-        if (signals.high_volume) score += 20;
-        if (signals.good_volatility) score += 20;
-
-        this.log('DEBUG', 'SIGNALS', `Analyse ${symbol}`, {
-            rsi: analysis.rsi.toFixed(2),
-            volumeRatio: analysis.volumeRatio.toFixed(2),
-            volatility: (analysis.volatility * 100).toFixed(2) + '%',
-            signals,
-            score,
-            threshold: 40
-        });
-
-        return score >= 40 ? { direction: 'BUY', score, signals } : null;
-    }
-
-    // Exécution de trade (gardé identique)
-    async executeSimulatedTrade(signal, symbol) {
-        const analysis = this.analyzeMarket(symbol);
-        const trade = {
-            id: `${Date.now()}_${symbol}`,
-            timestamp: Date.now(),
-            symbol,
-            direction: signal.direction,
-            entryPrice: analysis.currentPrice,
-            quantity: 0.01,
-            positionSize: analysis.currentPrice * 0.01,
-            stopLossPrice: analysis.currentPrice * (1 - this.config.stopLossPercent),
-            takeProfitPrice: analysis.currentPrice * (1 + this.config.dailyTargetMax),
-            confidence: signal.score,
-            paperTrading: true,
-            status: 'ACTIVE'
-        };
-
-        this.state.currentPositions.push(trade);
-        this.state.dailyStats.tradesCount++;
-
-        this.log('TRADE', 'SIMULATION', `Trade simulé ${signal.direction} sur ${symbol}`, {
-            price: analysis.currentPrice,
-            confidence: signal.score,
-            signals: signal.signals
-        });
-
-        setTimeout(() => {
-            this.closeSimulatedPosition(trade);
-        }, 10000 + Math.random() * 20000);
-
-        return trade;
-    }
-
-    // Fermeture de position (gardé identique)
-    closeSimulatedPosition(position) {
-        const index = this.state.currentPositions.findIndex(p => p.id === position.id);
-        if (index === -1) return;
-
-        const priceMovement = (Math.random() - 0.5) * 0.02;
-        const exitPrice = position.entryPrice * (1 + priceMovement);
-        const realizedPnL = (exitPrice - position.entryPrice) * position.quantity;
-        const pnLPercent = ((exitPrice - position.entryPrice) / position.entryPrice) * 100;
-
-        this.state.dailyStats.profitLoss += realizedPnL;
-
-        if (realizedPnL > 0) {
-            this.state.dailyStats.wins++;
-            this.state.consecutiveLosses = 0;
-        } else {
-            this.state.dailyStats.losses++;
-            this.state.consecutiveLosses++;
-            this.state.lastLossTime = Date.now();
-        }
-
-        this.state.dailyStats.winRate = 
-            this.state.dailyStats.wins / 
-            (this.state.dailyStats.wins + this.state.dailyStats.losses);
-
-        const closedTrade = {
-            ...position,
-            exitPrice,
-            exitTime: Date.now(),
-            realizedPnL,
-            pnLPercent: pnLPercent.toFixed(3),
-            reason: realizedPnL > 0 ? 'TAKE_PROFIT' : 'STOP_LOSS',
-            status: 'CLOSED'
-        };
-
-        this.log('TRADE', 'CLOSE', 
-               `Position fermée: ${closedTrade.reason} | PnL: ${pnLPercent.toFixed(2)}%`, 
-               closedTrade);
-
-        this.state.currentPositions.splice(index, 1);
-        this.saveTrade(closedTrade);
-    }
-
-    saveTrade(trade) {
-        const tradeRecord = { ...trade, dailyStats: { ...this.state.dailyStats } };
-        fs.appendFileSync(this.logFiles.trades, JSON.stringify(tradeRecord) + '\n');
-    }
-
-    // Boucle principale MODIFIÉE avec gestion du temps
-    async startTrading() {
-        this.state.isRunning = true;
-        this.resetDailyStats();
         
-        this.log('SUCCESS', 'SYSTEM', 'Bot de trading démarré', {
-            slot: `${this.config.timeSlot}h-${(this.config.timeSlot + 6) % 24}h`,
-            session: this.state.relayInfo.totalSessions
-        });
-
-        console.log(`\n🤖 RELAY TRADING BOT - SLOT ${this.config.timeSlot}H`);
-        console.log('═══════════════════════════════════════════════════');
-        console.log(`🕐 Créneau: ${this.config.timeSlot}h → ${(this.config.timeSlot + 6) % 24}h`);
-        console.log(`⏱️  Durée max: ${Math.floor(this.config.maxRuntime / 1000 / 60)}min`);
-        console.log(`🔗 Session #${this.state.relayInfo.totalSessions}`);
-        console.log(`📊 Trades repris: ${this.state.dailyStats.tradesCount}`);
-        console.log(`💰 PnL actuel: ${this.state.dailyStats.profitLoss.toFixed(2)}$`);
-        console.log('⚠️  MODE SIMULATION - Aucun argent réel\n');
-
-        while (this.state.isRunning) {
-            try {
-                // VÉRIFICATION CRITIQUE DU TEMPS
-                const runtimeInfo = this.getRuntimeInfo();
-                if (runtimeInfo.shouldStop) {
-                    await this.gracefulShutdown();
-                    break;
-                }
-
-                // Avertissement à 5h45
-                if (runtimeInfo.remainingMin <= 12 && runtimeInfo.remainingMin > 10) {
-                    this.log('WARN', 'RELAY', `⏰ Arrêt dans ${runtimeInfo.remainingMin}min`);
-                }
-
-                // Trading normal
-                if (this.canTrade()) {
-                    for (const symbol of this.config.symbols) {
-                        const analysis = this.analyzeMarket(symbol);
-                        const signal = this.shouldTrade(analysis, symbol);
-
-                        if (signal) {
-                            await this.executeSimulatedTrade(signal, symbol);
-                        }
-                    }
-                } else {
-                    this.log('WARN', 'SAFETY', 'Trading bloqué par les limites de sécurité', {
-                        dailyTrades: this.state.dailyStats.tradesCount,
-                        maxDaily: this.config.maxTradesPerDay,
-                        consecutiveLosses: this.state.consecutiveLosses,
-                        maxLosses: this.config.maxConsecutiveLosses
-                    });
-                }
-
-                this.displayStats();
-                await new Promise(resolve => setTimeout(resolve, 30000));
-
-            } catch (error) {
-                this.log('ERROR', 'SYSTEM', 'Erreur dans la boucle de trading', { error: error.message });
-                await new Promise(resolve => setTimeout(resolve, 5000));
-            }
+        const losingTrades = sessionTrades.filter(t => !t.isWin);
+        if (losingTrades.length > 0) {
+            console.log(`💸 PERDANTS (${losingTrades.length}):`);
+            losingTrades.forEach((trade, i) => {
+                console.log(`   ${i+1}. ${trade.direction} ${trade.symbol} → ${trade.pnl.toFixed(4)}$`);
+            });
         }
+        console.log('📊'.repeat(20));
     }
 
-    canTrade() {
-        const checks = {
-            dailyLimit: this.state.dailyStats.tradesCount < this.config.maxTradesPerDay,
-            consecutiveLosses: this.state.consecutiveLosses < this.config.maxConsecutiveLosses,
-            cooldown: !this.state.lastLossTime || 
-                     (Date.now() - this.state.lastLossTime) > this.config.cooldownAfterLoss
-        };
-        return Object.values(checks).every(check => check === true);
-    }
-
-    displayStats() {
-        const stats = this.state.dailyStats;
-        const runtime = this.getRuntimeInfo();
-        console.log(`📊 [${runtime.runtimeMin}/${Math.floor(this.config.maxRuntime/1000/60)}min] ${stats.tradesCount} trades | Win: ${(stats.winRate * 100).toFixed(1)}% | PnL: ${stats.profitLoss.toFixed(2)}$ | Positions: ${this.state.currentPositions.length}`);
-    }
-
-    stop() {
-        this.state.isRunning = false;
-        this.log('INFO', 'SYSTEM', 'Bot arrêté manuellement');
+    saveTrades() {
+        try {
+            const logsDir = path.dirname(this.logFile);
+            if (!fs.existsSync(logsDir)) {
+                fs.mkdirSync(logsDir, { recursive: true });
+            }
+            fs.writeFileSync(this.logFile, JSON.stringify(this.sessionTrades, null, 2));
+        } catch (error) {
+            console.error('❌ Erreur sauvegarde trades:', error.message);
+        }
     }
 }
 
-// Configuration par défaut
-const defaultConfig = {
-    paperTrading: true,
-    timeSlot: parseInt(process.env.TIME_SLOT) || 0,
-    dailyTargetMin: 0.003,
-    dailyTargetMax: 0.005,
-    stopLossPercent: 0.015,
-    totalCapital: 10000,
-    maxPositionPercent: 0.05,
-    symbols: ['BTCUSDT', 'ETHUSDT', 'ADAUSDT']
-};
+// ===== BOT PRINCIPAL =====
+class RealisticTradingBot {
+    constructor() {
+        this.isRunning = false;
+        this.balance = 1000;
+        this.positions = {};
+        this.tradeCount = 0;
+        this.winCount = 0;
+        this.totalPnL = 0;
+        this.state = this.loadState();
+        
+        // Système de sécurité
+        this.dailyTradeLimit = 3;
+        this.maxConsecutiveLosses = 3;
+        this.consecutiveLosses = 0;
+        
+        // Trade Tracker intégré
+        this.tracker = new TradeTracker();
+        
+        // Prix simulés
+        this.prices = {
+            'BTC/USD': 45000 + Math.random() * 10000,
+            'ETH/USD': 3000 + Math.random() * 1000,
+            'ADA/USD': 0.5 + Math.random() * 0.3
+        };
+        
+        this.startPriceUpdates();
+    }
 
-// Démarrage du bot
-const bot = new RelayTradingBot(defaultConfig);
+    loadState() {
+        try {
+            if (fs.existsSync('./state.json')) {
+                const data = JSON.parse(fs.readFileSync('./state.json', 'utf8'));
+                console.log('📂 État précédent chargé');
+                return data;
+            }
+        } catch (error) {
+            console.log('📂 Nouvel état créé');
+        }
+        return { dailyTrades: 0, lastTradeDate: null };
+    }
+
+    saveState() {
+        try {
+            fs.writeFileSync('./state.json', JSON.stringify(this.state, null, 2));
+        } catch (error) {
+            console.error('❌ Erreur sauvegarde état:', error.message);
+        }
+    }
+
+    // Simulateur de prix réaliste
+    startPriceUpdates() {
+        setInterval(() => {
+            Object.keys(this.prices).forEach(symbol => {
+                const change = (Math.random() - 0.5) * 0.02; // ±1% par update
+                this.prices[symbol] *= (1 + change);
+                this.prices[symbol] = Math.round(this.prices[symbol] * 10000) / 10000;
+            });
+        }, 5000); // Update toutes les 5 secondes
+    }
+
+    // Vérifier les limites de sécurité
+    checkSafetyLimits() {
+        const today = new Date().toDateString();
+        if (this.state.lastTradeDate !== today) {
+            this.state.dailyTrades = 0;
+            this.state.lastTradeDate = today;
+        }
+
+        const reasons = [];
+        if (this.state.dailyTrades >= this.dailyTradeLimit) {
+            reasons.push(`dailyTrades: ${this.state.dailyTrades}, maxDaily: ${this.dailyTradeLimit}`);
+        }
+        if (this.consecutiveLosses >= this.maxConsecutiveLosses) {
+            reasons.push(`consecutiveLosses: ${this.consecutiveLosses}, maxLosses: ${this.maxConsecutiveLosses}`);
+        }
+
+        if (reasons.length > 0) {
+            console.log(`⚠️ [SAFETY] Trading bloqué par les limites de sécurité { ${reasons.join(', ')} }`);
+            return false;
+        }
+        return true;
+    }
+
+    // Analyser le marché (simulation)
+    analyzeMarket() {
+        const symbols = Object.keys(this.prices);
+        const selectedSymbol = symbols[Math.floor(Math.random() * symbols.length)];
+        const currentPrice = this.prices[selectedSymbol];
+        
+        // Simulation d'analyse technique
+        const rsi = Math.random() * 100;
+        const macdSignal = Math.random() > 0.5 ? 'BUY' : 'SELL';
+        const volumeStrength = Math.random();
+        
+        // Logique de décision simplifiée
+        const shouldTrade = Math.random() > 0.7; // 30% de chance de trade
+        const direction = rsi < 30 ? 'LONG' : rsi > 70 ? 'SHORT' : (Math.random() > 0.5 ? 'LONG' : 'SHORT');
+        
+        return {
+            symbol: selectedSymbol,
+            price: currentPrice,
+            direction: direction,
+            confidence: volumeStrength,
+            shouldTrade: shouldTrade,
+            analysis: { rsi, macdSignal, volumeStrength }
+        };
+    }
+
+    // Exécuter un trade
+    async executeTrade(analysis) {
+        if (!this.checkSafetyLimits()) return;
+
+        const { symbol, price, direction, confidence } = analysis;
+        const amount = 0.1; // Quantité fixe pour simulation
+        
+        // Enregistrer le trade dans le tracker
+        const tradeId = this.tracker.recordTrade(symbol, price, direction, amount);
+        
+        // Simuler l'exécution
+        console.log(`\n🚀 EXÉCUTION TRADE:`);
+        console.log(`   Symbole: ${symbol}`);
+        console.log(`   Direction: ${direction}`);
+        console.log(`   Prix entrée: ${price}$`);
+        console.log(`   Confiance: ${(confidence * 100).toFixed(1)}%`);
+        
+        // Mise à jour des compteurs
+        this.tradeCount++;
+        this.state.dailyTrades++;
+        this.saveState();
+        
+        // Simuler la durée du trade (15-60 secondes)
+        const tradeDuration = 15000 + Math.random() * 45000;
+        
+        setTimeout(() => {
+            this.closeTrade(tradeId, symbol, price, direction, amount);
+        }, tradeDuration);
+    }
+
+    // Fermer un trade
+    closeTrade(tradeId, symbol, entryPrice, direction, amount) {
+        const currentPrice = this.prices[symbol];
+        
+        // Simuler un résultat réaliste (60% de chance de gain)
+        const marketDirection = Math.random() > 0.4 ? 1 : -1;
+        const priceChange = (Math.random() * 0.03 + 0.005) * marketDirection; // 0.5-3.5%
+        const exitPrice = entryPrice * (1 + priceChange);
+        
+        // Calculer PnL
+        const pnlMultiplier = direction === 'LONG' ? 1 : -1;
+        const pnl = (exitPrice - entryPrice) * amount * pnlMultiplier;
+        const isWin = pnl > 0;
+        
+        // Enregistrer dans le tracker
+        const closedTrade = this.tracker.closeTrade(tradeId, exitPrice, pnl);
+        
+        // Mettre à jour les stats du bot
+        if (isWin) {
+            this.winCount++;
+            this.consecutiveLosses = 0;
+        } else {
+            this.consecutiveLosses++;
+        }
+        
+        this.totalPnL += pnl;
+        
+        // Log de fermeture
+        console.log(`\n💰 TRADE FERMÉ:`);
+        console.log(`   Prix sortie: ${exitPrice.toFixed(4)}$`);
+        console.log(`   PnL: ${pnl > 0 ? '+' : ''}${pnl.toFixed(4)}$`);
+        console.log(`   Résultat: ${isWin ? '🟢 GAGNANT' : '🔴 PERDANT'}`);
+    }
+
+    // Afficher les statistiques
+    showStats() {
+        const winRate = this.tradeCount > 0 ? (this.winCount / this.tradeCount * 100) : 0;
+        const currentSession = this.tracker.getCurrentSession();
+        
+        console.log(`\n📊 [${Math.floor(Date.now()/60000) % 1000}/${Math.floor(Date.now()/60000) % 1000}min] ${this.tradeCount} trades | Win: ${winRate.toFixed(1)}% | PnL: ${this.totalPnL.toFixed(2)}$ | Positions: ${Object.keys(this.positions).length}`);
+        
+        if (!this.checkSafetyLimits()) {
+            console.log(`⚠️ [SAFETY] Trading suspendu pour cette session`);
+        }
+    }
+
+    // Boucle principale du bot
+    async start() {
+        console.log('🤖 Realistic Trading Bot - Version Enhanced démarré!');
+        console.log(`⏰ Session: ${this.tracker.getCurrentSession()}`);
+        console.log('📊 Système de tracking des trades activé');
+        
+        this.isRunning = true;
+
+        while (this.isRunning) {
+            try {
+                // Afficher les stats toutes les minutes
+                this.showStats();
+                
+                // Analyser le marché
+                const analysis = this.analyzeMarket();
+                
+                // Exécuter un trade si les conditions sont réunies
+                if (analysis.shouldTrade && this.checkSafetyLimits()) {
+                    await this.executeTrade(analysis);
+                } else {
+                    console.log('⏳ Analyse du marché... Aucun signal de trade');
+                }
+                
+                // Attendre avant la prochaine analyse (2-5 minutes)
+                const waitTime = 120000 + Math.random() * 180000;
+                await new Promise(resolve => setTimeout(resolve, waitTime));
+                
+            } catch (error) {
+                console.error('❌ Erreur dans la boucle principale:', error);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+            }
+        }
+    }
+
+    // Arrêter le bot proprement
+    stop() {
+        console.log('🛑 Arrêt du bot...');
+        this.isRunning = false;
+        this.tracker.showSessionStats();
+        this.saveState();
+    }
+}
+
+// ===== DÉMARRAGE DU BOT =====
+const bot = new RealisticTradingBot();
 
 // Gestion des signaux d'arrêt
-process.on('SIGINT', async () => {
-    console.log('\n⚠️  Signal d\'arrêt reçu...');
-    await bot.gracefulShutdown();
+process.on('SIGINT', () => {
+    console.log('\n🛑 Signal d\'arrêt reçu');
+    bot.stop();
+    process.exit(0);
 });
 
-process.on('SIGTERM', async () => {
-    console.log('\n⚠️  Signal de terminaison reçu...');
-    await bot.gracefulShutdown();
+process.on('SIGTERM', () => {
+    console.log('\n🛑 Signal de terminaison reçu');
+    bot.stop();
+    process.exit(0);
 });
 
-// Démarrage
-bot.startTrading().catch(async (error) => {
+// Démarrer le bot
+bot.start().catch(error => {
     console.error('❌ Erreur fatale:', error);
-    await bot.saveState(); // Sauvegarder même en cas d'erreur
     process.exit(1);
 });
+
+// Export pour tests
+module.exports = { RealisticTradingBot, TradeTracker };
