@@ -1,12 +1,37 @@
 {
-  "name": "relay-trading-bot",
-  "version": "1.0.0",
-  "description": "Bot trading avec relais",
-  "main": "realistic_bot.js",
+  "name": "enhanced-trading-bot",
+  "version": "2.0.0",
+  "description": "Bot de trading réaliste avec système de logging avancé",
+  "main": "realistic-bots/realistic-bot.js",
   "scripts": {
-    "start": "node realistic_bot.js"
+    "start": "node realistic-bots/realistic-bot.js",
+    "dev": "nodemon realistic-bots/realistic-bot.js",
+    "test": "node realistic-bots/test-bot.js",
+    "logs": "node scripts/analyze-logs.js",
+    "export": "node scripts/export-data.js",
+    "clean": "node scripts/clean-logs.js"
   },
+  "keywords": [
+    "trading",
+    "bot",
+    "cryptocurrency",
+    "logging",
+    "automation"
+  ],
+  "author": "reemkux",
+  "license": "MIT",
   "dependencies": {
-    "ws": "^8.14.2"
+    "fs": "^0.0.1-security",
+    "path": "^0.12.7"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/reemkux/bot-js.git"
   }
 }
